@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Design a music player that can load playlists, play/pause/skip tracks, support shuffle and repeat modes, notify listeners on song changes, and produce recommendations based on swappable strategies — all without modifying core player logic when extending behaviour.
+Design a multi-user music player that can load playlists, play/pause/skip tracks, support shuffle and repeat modes, notify listeners on song changes, and produce recommendations based on swappable strategies — with each user getting a fully isolated player instance managed by a central `UserManager`.
 
 ---
 
@@ -18,6 +18,14 @@ Design a music player that can load playlists, play/pause/skip tracks, support s
 ## Class Diagram
 
 ```
+UserManager
+├── Map<String, User>          users           (ConcurrentHashMap)
+└── Map<String, MusicPlayer>   playersByUser   (ConcurrentHashMap, one per user)
+
+User
+├── String id
+└── String name
+
 MusicPlayer
 ├── List<Song>                  queue
 ├── int                         currentIndex
@@ -29,7 +37,7 @@ MusicPlayer
 └── Deque<Song>                 playHistory  (max 20, most-recent first)
 
 Playlist
-├── String id / name
+├── String id / ownerId / name
 └── List<Song>  songs
 
 Song
@@ -41,6 +49,26 @@ Song
 ---
 
 ## Core Classes
+
+### `UserManager`
+
+Central registry that owns one `MusicPlayer` per user. Players are created lazily on first access and reused on subsequent calls.
+
+| Method | Description |
+|---|---|
+| `registerUser(user)` | Adds a `User` to the registry |
+| `getUser(userId)` | Looks up a user by ID |
+| `getPlayerFor(userId)` | Returns (or creates) the `MusicPlayer` bound to that user |
+
+`computeIfAbsent` on the `ConcurrentHashMap` guarantees exactly one `MusicPlayer` is created per user even under concurrent access — no explicit synchronization needed.
+
+---
+
+### `User`
+
+Simple value object: `id` + `name`. Passed to `UserManager.registerUser` to establish identity. `Playlist` stores the owner's `id` via `ownerId` to record which user a playlist belongs to.
+
+---
 
 ### `MusicPlayer`
 
@@ -117,27 +145,34 @@ Registered via `addObserver`. The player uses `CopyOnWriteArrayList` so observer
 
 ## Demo Walkthrough (`MusicPlayerWithRecommendationDemo.main`)
 
-**Library:** Song A (Pop), Song B (Rock), Song C (Pop)
+**Library:** Song A (Pop), Song B (Rock), Song C (Pop)  
+**Users:** Alice (u1) — full library playlist; Bob (u2) — Song B + Song C only
 
-| Step | Action | Output / State |
+| Step | Action | Output |
 |---|---|---|
-| 1 | `loadPlaylist` + `play()` | "Now playing: Song A - Artist X" |
-| 2 | `next()` | "Now playing: Song B - Artist Y" |
-| 3 | `setRepeatMode(REPEAT_ONE)` + `next()` | "Now playing: Song B - Artist Y" (repeated) |
-| 4 | `getRecommendations` with `GenreMatchStrategy` | `[]` — Song B is Rock, no other Rock songs |
-| 5 | Swap to `CollaborativeFilterStrategy` | Returns Song A and Song C (stub) |
-| 6 | Swap to `RecentlyPlayedStrategy` | Returns recently played songs from live history |
-| 7 | `setTraversal(ShuffleTraversal)` + `next()` | Random song from queue |
-| 8 | Empty player `play()` | No-op; state stays `STOPPED` |
+| 1 | Register Alice & Bob; get isolated players via `UserManager` | Two separate `MusicPlayer` instances |
+| 2 | Alice: `loadPlaylist` + `play()` | "[Alice] Now playing: Song A - Artist X" |
+| 3 | Alice: `next()` | "[Alice] Now playing: Song B - Artist Y" |
+| 4 | Bob: `loadPlaylist` + `play()` | "[Bob] Now playing: Song B - Artist Y" |
+| 5 | Print both histories | Alice history: [Song B, Song A]; Bob history: [Song B] — fully isolated |
+| 6 | `getPlayerFor(alice.getId())` again | Returns **same instance** — `true` |
+| 7 | Alice: `setRepeatMode(REPEAT_ONE)` + `next()` | "[Alice] Now playing: Song B - Artist Y" (repeated) |
+| 8 | Alice: `getRecommendations` with `GenreMatchStrategy` | `[]` — Song B is Rock, no other Rock songs |
+| 9 | Alice: swap to `CollaborativeFilterStrategy` | Returns Song A and Song C (stub) |
+| 10 | Alice: swap to `RecentlyPlayedStrategy` | Returns recently played songs from Alice's live history |
+| 11 | Alice: `setTraversal(ShuffleTraversal)` + `next()` | Random song from Alice's queue |
+| 12 | Empty player `play()` | No-op; state stays `STOPPED` |
 
 ---
 
 ## Concurrency Notes
 
+- `UserManager` uses `ConcurrentHashMap` + `computeIfAbsent` to guarantee exactly one `MusicPlayer` per user without explicit locking.
 - `MusicPlayer` uses a private `lock` object for all state mutations (`queue`, `currentIndex`, `state`, `playHistory`).
 - Observer notifications are dispatched **outside** the lock so a slow observer cannot block the player.
 - `CopyOnWriteArrayList` for `observers` allows safe add/remove while a notification loop is running.
 - `volatile` on `state` ensures reads from other threads see the latest value without entering `synchronized`.
+- Each user's `MusicPlayer` is fully isolated — no shared mutable state between Alice's and Bob's players.
 
 ---
 
@@ -157,3 +192,5 @@ Zero changes to `MusicPlayer` itself — demonstrated live in the demo with `Col
 - **New recommender** — implement `RecommendationStrategy` (e.g., `ArtistMatchStrategy`, `MoodBasedStrategy`).
 - **New observer** — implement `PlayerObserver` (e.g., a UI component, a scrobbler, a lyrics fetcher).
 - **Persistent history** — replace `ArrayDeque` with a database-backed store; `RecentlyPlayedStrategy` is unaffected as long as the `Deque` interface is preserved.
+- **Multi-user playlists** — `Playlist` already stores `ownerId`; add access control logic to `UserManager` without touching `MusicPlayer`.
+- **New user store** — replace `UserManager`'s `ConcurrentHashMap` with a database-backed store to support persistent user sessions.

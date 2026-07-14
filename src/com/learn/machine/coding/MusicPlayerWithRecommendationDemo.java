@@ -44,17 +44,33 @@ class Song {
 
 class Playlist {
     private final String id;
+    private final String ownerId;
     private final String name;
     private final List<Song> songs = new ArrayList<>();
 
-    public Playlist(String id, String name) {
+    public Playlist(String id, String ownerId, String name) {
         this.id = id;
+        this.ownerId = ownerId;
         this.name = name;
     }
 
     public void addSong(Song song) { songs.add(song); }
     public void removeSong(String songId) { songs.removeIf(s -> s.getId().equals(songId)); }
     public List<Song> getSongs() { return Collections.unmodifiableList(songs); }
+    public String getName() { return name; }
+    public String getOwnerId() { return ownerId; }
+}
+
+class User {
+    private final String id;
+    private final String name;
+
+    public User(String id, String name) {
+        this.id = id;
+        this.name = name;
+    }
+
+    public String getId() { return id; }
     public String getName() { return name; }
 }
 
@@ -273,6 +289,28 @@ class MusicPlayer {
 }
 
 
+class UserManager {
+    private final Map<String, User> users = new java.util.concurrent.ConcurrentHashMap<>();
+    // One MusicPlayer per user - each gets its own queue, playback state,
+    // and play history, isolated from every other user.
+    private final Map<String, MusicPlayer> playersByUser = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public void registerUser(User user) {
+        users.put(user.getId(), user);
+    }
+
+    public User getUser(String userId) {
+        return users.get(userId);
+    }
+
+    // computeIfAbsent guarantees exactly one MusicPlayer is created per
+    // user even if called concurrently from multiple threads.
+    public MusicPlayer getPlayerFor(String userId) {
+        return playersByUser.computeIfAbsent(userId, id -> new MusicPlayer());
+    }
+}
+
+
 
 public class MusicPlayerWithRecommendationDemo {
     public static void main(String[] args) {
@@ -281,36 +319,61 @@ public class MusicPlayerWithRecommendationDemo {
         Song s3 = new Song("3", "Song C", "Artist X", "Pop", 220);
         List<Song> library = Arrays.asList(s1, s2, s3);
 
-        Playlist playlist = new Playlist("p1", "My Mix");
-        for (Song s : library) playlist.addSong(s);
+        User alice = new User("u1", "Alice");
+        User bob = new User("u2", "Bob");
 
-        MusicPlayer player = new MusicPlayer();
-        player.addObserver(song -> System.out.println("Now playing: " + song));
-        player.setRecommender(new GenreMatchStrategy());
+        UserManager userManager = new UserManager();
+        userManager.registerUser(alice);
+        userManager.registerUser(bob);
 
-        player.loadPlaylist(playlist);
-        player.play();                          // Now playing: Song A - Artist X
-        player.next();                           // Now playing: Song B - Artist Y
+        Playlist alicePlaylist = new Playlist("p1", alice.getId(), "Alice's Mix");
+        for (Song s : library) alicePlaylist.addSong(s);
 
-        player.setRepeatMode(RepeatMode.REPEAT_ONE);
-        player.next();                           // Now playing: Song B - Artist Y (repeat)
+        Playlist bobPlaylist = new Playlist("p2", bob.getId(), "Bob's Mix");
+        bobPlaylist.addSong(s2);
+        bobPlaylist.addSong(s3);
 
-        System.out.println("Recommendations: " + player.getRecommendations(library, 2));
+        // Each user gets their own isolated MusicPlayer via UserManager -
+        // no shared state between Alice and Bob.
+        MusicPlayer alicePlayer = userManager.getPlayerFor(alice.getId());
+        MusicPlayer bobPlayer = userManager.getPlayerFor(bob.getId());
+
+        alicePlayer.addObserver(song -> System.out.println("[Alice] Now playing: " + song));
+        bobPlayer.addObserver(song -> System.out.println("[Bob] Now playing: " + song));
+
+        alicePlayer.loadPlaylist(alicePlaylist);
+        alicePlayer.play();                      // [Alice] Now playing: Song A - Artist X
+        alicePlayer.next();                       // [Alice] Now playing: Song B - Artist Y
+
+        bobPlayer.loadPlaylist(bobPlaylist);
+        bobPlayer.play();                         // [Bob] Now playing: Song B - Artist Y
+
+        // Proof of isolation: Alice's history should NOT contain Bob's plays
+        System.out.println("Alice history: " + alicePlayer.getHistory());
+        System.out.println("Bob history:   " + bobPlayer.getHistory());
+
+        // Same instance returned on repeated lookup for the same user
+        MusicPlayer aliceAgain = userManager.getPlayerFor(alice.getId());
+        System.out.println("Same player instance for Alice: " + (alicePlayer == aliceAgain));
+
+        alicePlayer.setRepeatMode(RepeatMode.REPEAT_ONE);
+        alicePlayer.next();                       // [Alice] Now playing: Song B - Artist Y (repeat)
+
+        System.out.println("Alice recommendations: " + alicePlayer.getRecommendations(library, 2));
 
         // Live extension demo: swap in a new recommender with zero core changes
-        player.setRecommender(new CollaborativeFilterStrategy());
-        System.out.println("Collaborative recs: " + player.getRecommendations(library, 2));
+        alicePlayer.setRecommender(new CollaborativeFilterStrategy());
+        System.out.println("Alice collaborative recs: " + alicePlayer.getRecommendations(library, 2));
 
         // RecentlyPlayedStrategy demo: history is populated automatically by
         // the player itself (see notifyObservers) and shared by reference.
-        player.setRecommender(new RecentlyPlayedStrategy(player.getHistory()));
-        System.out.println("Recently played history: " + player.getHistory());
-        System.out.println("Recently-played recs: " + player.getRecommendations(library, 2));
+        alicePlayer.setRecommender(new RecentlyPlayedStrategy(alicePlayer.getHistory()));
+        System.out.println("Alice recently-played recs: " + alicePlayer.getRecommendations(library, 2));
 
         // Live extension demo: swap traversal strategy
-        player.setRepeatMode(RepeatMode.NONE);
-        player.setTraversal(new ShuffleTraversal());
-        player.next();
+        alicePlayer.setRepeatMode(RepeatMode.NONE);
+        alicePlayer.setTraversal(new ShuffleTraversal());
+        alicePlayer.next();
 
         // Edge case: empty queue
         MusicPlayer emptyPlayer = new MusicPlayer();
